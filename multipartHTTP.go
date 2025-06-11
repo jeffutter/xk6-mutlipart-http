@@ -75,55 +75,6 @@ type Payload struct {
 	payload string
 }
 
-func formatHeaders(headers http.Header) string {
-	var builder strings.Builder
-	for key, values := range headers {
-		for _, value := range values {
-			builder.WriteString(fmt.Sprintf("%s: %s\n", key, value))
-		}
-	}
-	return builder.String()
-}
-
-// formatAsCurl formats an HTTP request as a curl command for debugging
-func formatAsCurl(req *http.Request, body string) string {
-	var curl strings.Builder
-
-	// Start with curl command
-	curl.WriteString("curl -X ")
-	curl.WriteString(req.Method)
-	curl.WriteString(" ")
-
-	// Add URL (quoted to handle special characters)
-	curl.WriteString("'")
-	curl.WriteString(req.URL.String())
-	curl.WriteString("'")
-
-	// Add headers
-	for name, values := range req.Header {
-		for _, value := range values {
-			curl.WriteString(" \\\n  -H '")
-			curl.WriteString(name)
-			curl.WriteString(": ")
-			// Escape single quotes in header values
-			escapedValue := strings.ReplaceAll(value, "'", "'\"'\"'")
-			curl.WriteString(escapedValue)
-			curl.WriteString("'")
-		}
-	}
-
-	// Add body if present
-	if body != "" {
-		curl.WriteString(" \\\n  --data-raw '")
-		// Escape single quotes in body
-		escapedBody := strings.ReplaceAll(body, "'", "'\"'\"'")
-		curl.WriteString(escapedBody)
-		curl.WriteString("'")
-	}
-
-	return curl.String()
-}
-
 // Exports implements the modules.Instance interface and returns the exported types for the JS module.
 func (r *MultipartSubscriptionAPI) Exports() modules.Exports {
 	return modules.Exports{
@@ -213,9 +164,6 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 
 	urlString := url.String()
 	client, err := ms.request(state, rt, urlString, parsedArgs)
-
-	// headerString := formatHeaders(client.resp.Header)
-	// fmt.Println("Response Headers: ", headerString)
 
 	if err != nil {
 		// Pass the error to the user script before exiting immediately
@@ -452,11 +400,9 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 	if _, ok := req.Header["Accept-Encoding"]; !ok {
 		req.Header.Set("Accept-Encoding", "gzip, deflate")
 	}
-	req.Header.Del("Accept-Encoding")
 
-	// Log the request as a curl command for debugging
-	// curlCommand := formatAsCurl(req, args.body)
-	// log.Printf("Request as curl command:\n%s", curlCommand)
+	// Remove the Accept-Encoding header. Only support utf-8 responses
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := httpClient.Do(req)
 
@@ -529,6 +475,7 @@ func parseURL(urlValue sobek.Value) (*url.URL, error) {
 func (ms *MultipartSubscription) defineMultipartHttp(rt *sobek.Runtime) {
 	must(rt, ms.obj.DefineDataProperty("close", rt.ToValue(ms.close), sobek.FLAG_FALSE, sobek.FLAG_TRUE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineDataProperty("url", rt.ToValue(ms.url.String()), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
+	must(rt, ms.obj.DefineDataProperty("requestID", rt.ToValue(ms.requestID.String()), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineDataProperty("addEventListener", rt.ToValue(ms.addEventListener), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineAccessorProperty("readyState", rt.ToValue(func() sobek.Value { return rt.ToValue((uint)(ms.readyState)) }), nil, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 

@@ -216,7 +216,7 @@ func (p *Parser) readBody() ([]byte, error) {
 
 		// Add line to body
 		body.WriteString(line)
-		// body.WriteByte('\n')
+		body.WriteByte('\n')
 	}
 }
 
@@ -238,29 +238,6 @@ func (p *Parser) readLine() (string, error) {
 
 	return line, nil
 }
-
-// // ParseAll is a convenience function that parses all parts from a multipart stream
-// func ParseAll(r io.Reader, contentType string) ([]*Part, error) {
-// 	parser, err := NewParser(r, contentType)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-//
-// 	var parts []*Part
-//
-// 	for {
-// 		part, err := parser.NextPart()
-// 		if err == io.EOF {
-// 			break
-// 		}
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		parts = append(parts, part)
-// 	}
-//
-// 	return parts, nil
-// }
 
 // GetContentType returns the Content-Type header value for a part
 func (p *Part) GetContentType() string {
@@ -290,35 +267,3 @@ func (p *Part) IsBinary() bool {
 func (p *Part) String() string {
 	return string(p.Body)
 }
-
-// Example usage:
-//
-// func main() {
-//     data := `--boundary123
-// Content-Type: text/plain
-//
-// This is the first part.
-// --boundary123
-// Content-Type: application/octet-stream
-// Content-Disposition: attachment; filename="data.bin"
-//
-// Binary data here...
-// --boundary123--`
-//
-//     reader := strings.NewReader(data)
-//     parts, err := ParseAll(reader, "multipart/mixed; boundary=boundary123")
-//     if err != nil {
-//         log.Fatal(err)
-//     }
-//
-//     for i, part := range parts {
-//         fmt.Printf("Part %d:\n", i+1)
-//         fmt.Printf("  Content-Type: %s\n", part.GetContentType())
-//         fmt.Printf("  Is Binary: %t\n", part.IsBinary())
-//         fmt.Printf("  Body Length: %d\n", len(part.Body))
-//         if part.IsText() {
-//             fmt.Printf("  Body: %s\n", part.String())
-//         }
-//         fmt.Println()
-//     }
-// }

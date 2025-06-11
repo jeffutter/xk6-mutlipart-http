@@ -3,6 +3,9 @@ package multipartHTTP
 import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
+
+	"github.com/google/uuid"
+	"github.com/grafana/sobek"
 )
 
 type (
@@ -30,7 +33,7 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		vu:                   vu,
 		exports:              rt.NewObject(),
 		httpMultipartMetrics: metrics,
-		holder:               &ObjectHolder{},
+		holder:               &ObjectHolder{objects: make(map[uuid.UUID]sobek.Value)},
 	}
 
 	mustExport := func(name string, value interface{}) {
