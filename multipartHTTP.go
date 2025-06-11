@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/grafana/sobek"
-	"github.com/mstoykov/k6-taskqueue-lib/taskqueue"
 	"github.com/jeffutter/xk6-mutlipart-http/events"
+	"github.com/mstoykov/k6-taskqueue-lib/taskqueue"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
@@ -26,6 +27,8 @@ type MultipartSubscriptionAPI struct { //nolint:revive
 	exports *sobek.Object
 
 	httpMultipartMetrics *HTTPMultipartMetrics
+
+	holder *ObjectHolder `js:"holder"` // used to keep the object alive
 }
 
 // MultipartSubscription represents an instance of the JS module for every VU.
@@ -48,19 +51,22 @@ type MultipartSubscription struct {
 
 	// fields that should be seen by js only be updated on the event loop
 	readyState ReadyState
+
+	requestID uuid.UUID
+
+	holder *ObjectHolder // used to keep the object alive
 }
 
-// ReadyState is websocket specification's readystate
 type ReadyState uint8
 
 const (
 	// CONNECTING is the state while the web socket is connecting
 	CONNECTING ReadyState = iota
-	// OPEN is the state after the websocket is established and before it starts closing
+	// OPEN is the state after the connection is established and before it starts closing
 	OPEN
-	// CLOSING is while the websocket is closing but is *not* closed yet
+	// CLOSING is while the connection is closing but is *not* closed yet
 	CLOSING
-	// CLOSED is when the websocket is finally closed
+	// CLOSED is when the connection is finally closed
 	CLOSED
 )
 
@@ -69,11 +75,65 @@ type Payload struct {
 	payload string
 }
 
+func formatHeaders(headers http.Header) string {
+	var builder strings.Builder
+	for key, values := range headers {
+		for _, value := range values {
+			builder.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+		}
+	}
+	return builder.String()
+}
+
+// formatAsCurl formats an HTTP request as a curl command for debugging
+func formatAsCurl(req *http.Request, body string) string {
+	var curl strings.Builder
+
+	// Start with curl command
+	curl.WriteString("curl -X ")
+	curl.WriteString(req.Method)
+	curl.WriteString(" ")
+
+	// Add URL (quoted to handle special characters)
+	curl.WriteString("'")
+	curl.WriteString(req.URL.String())
+	curl.WriteString("'")
+
+	// Add headers
+	for name, values := range req.Header {
+		for _, value := range values {
+			curl.WriteString(" \\\n  -H '")
+			curl.WriteString(name)
+			curl.WriteString(": ")
+			// Escape single quotes in header values
+			escapedValue := strings.ReplaceAll(value, "'", "'\"'\"'")
+			curl.WriteString(escapedValue)
+			curl.WriteString("'")
+		}
+	}
+
+	// Add body if present
+	if body != "" {
+		curl.WriteString(" \\\n  --data-raw '")
+		// Escape single quotes in body
+		escapedBody := strings.ReplaceAll(body, "'", "'\"'\"'")
+		curl.WriteString(escapedBody)
+		curl.WriteString("'")
+	}
+
+	return curl.String()
+}
+
 // Exports implements the modules.Instance interface and returns the exported types for the JS module.
 func (r *MultipartSubscriptionAPI) Exports() modules.Exports {
 	return modules.Exports{
 		Default: r.exports,
 	}
+}
+
+// Hold MultipartSubscription JS objects so they don't get GC'd until Closed
+type ObjectHolder struct {
+	objects map[uuid.UUID]sobek.Value
 }
 
 // InternalState holds basic metadata from the runtime state.
@@ -125,7 +185,11 @@ func (r *MultipartSubscriptionAPI) multipartSubscription(c sobek.ConstructorCall
 		tagsAndMeta:          &tagsAndMeta,
 		builtinMetrics:       r.vu.State().BuiltinMetrics,
 		httpMultipartMetrics: r.httpMultipartMetrics,
+		requestID:            uuid.New(),
+		holder:               r.holder,
 	}
+
+	r.holder.objects[s.requestID] = s.obj
 
 	s.defineMultipartHttp(rt)
 	go s.establishConnection(*url, params)
@@ -150,6 +214,9 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 	urlString := url.String()
 	client, err := ms.request(state, rt, urlString, parsedArgs)
 
+	// headerString := formatHeaders(client.resp.Header)
+	// fmt.Println("Response Headers: ", headerString)
+
 	if err != nil {
 		// Pass the error to the user script before exiting immediately
 		// client.handleEvent("error", rt.ToValue(err))
@@ -172,7 +239,7 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 	readCloseChan := make(chan int)
 
 	// Wraps a couple of channels
-	go client.readEvents(readEventChan, readErrChan, readCloseChan)
+	go client.readEvents(readEventChan, readErrChan, readCloseChan, client.resp.Header.Get("Content-Type"))
 
 	// This is the main control loop. All JS code (including error handlers)
 	// should only be executed by this thread to avoid race conditions
@@ -215,9 +282,9 @@ func (ms *MultipartSubscription) queueClose(timestamp time.Time) {
 func (ms *MultipartSubscription) queueMessage(msg *message) {
 	ms.tq.Queue(func() error {
 		if ms.readyState != OPEN {
-			return nil // TODO maybe still emst
+			return nil // TODO maybe still emit
 		}
-		// TODO maybe emst after all the listeners have fired and skip it if defaultPrevent was called?!?
+		// TODO maybe emit after all the listeners have fired and skip it if defaultPrevent was called?!?
 		metrics.PushIfNotDone(ms.vu.Context(), ms.vu.State().Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
 				Metric: ms.httpMultipartMetrics.HTTPMultipartMessagesReceived,
@@ -236,6 +303,7 @@ func (ms *MultipartSubscription) queueMessage(msg *message) {
 		must(rt, ev.DefineDataProperty("origin", rt.ToValue(ms.url.String()), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 
 		for _, messageListener := range ms.eventListeners.all(events.MESSAGE) {
+
 			if _, err := messageListener(ev); err != nil {
 				// _ = ms.conn.Close()                   // TODO log it?
 				_ = ms.connectionClosedWithError(err) // TODO log it?
@@ -298,34 +366,35 @@ func (ms MultipartSubscription) loop(client *Client, readEventChan chan Payload,
 	for {
 		select {
 		case event := <-readEventChan:
+			ms.vu.State().Logger.Debugf("[%s] Subscription message received: %s", ms.requestID, event.payload)
 			ms.queueMessage(&message{
 				data: event.payload,
 				t:    time.Now(),
 			})
 
 		case readErr := <-readErrChan:
-			ms.vu.State().Logger.Errorf("Subscription read error: %s", readErr)
+			ms.vu.State().Logger.Errorf("[%s] Subscription read error: %s", ms.requestID, readErr)
 			ms.queueMessage(&message{
 				data: readErr.Error(),
 				t:    time.Now(),
 			})
 
 		case <-ctxDone:
-			ms.vu.State().Logger.Debugf("VU Shutting down, subscription messages will not be forwarded to VU")
+			ms.vu.State().Logger.Debugf("[%s] VU Shutting down, subscription messages will not be forwarded to VU", ms.requestID)
 			// _ = client.closeResponseBody()
 			ctxDone = nil
 
 		case <-readCloseChan:
-			ms.vu.State().Logger.Debugf("Subscription closing")
+			ms.vu.State().Logger.Debugf("[%s] Subscription closing", ms.requestID)
 			_ = client.closeResponseBody()
 
 		case <-ms.done:
-			ms.vu.State().Logger.Debugf("MultipartSubscription closed")
+			ms.vu.State().Logger.Debugf("[%s] MultipartSubscription closed", ms.requestID)
 			_ = client.closeResponseBody()
 			return
 
 		case <-client.done:
-			ms.vu.State().Logger.Debugf("Subscription closed")
+			ms.vu.State().Logger.Debugf("[%s] Subscription closed", ms.requestID)
 			return
 		}
 	}
@@ -335,11 +404,12 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 	ctx := ms.vu.Context()
 
 	subscriptionClient := Client{
-		rt:     rt,
-		ctx:    ctx,
-		url:    url,
-		done:   make(chan struct{}),
-		Logger: ms.vu.State().Logger,
+		rt:        rt,
+		ctx:       ctx,
+		url:       url,
+		done:      make(chan struct{}),
+		Logger:    ms.vu.State().Logger,
+		requestID: ms.requestID,
 	}
 
 	httpClient := &http.Client{
@@ -353,6 +423,7 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 			ExpectContinueTimeout: 1 * time.Second,
 			DialContext:           state.Dialer.DialContext,
 			Proxy:                 http.ProxyFromEnvironment,
+			DisableCompression:    false, // Enable gzip compression support
 			// TLSClientConfig: tlsConfig,
 		},
 	}
@@ -367,12 +438,25 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 		return &subscriptionClient, err
 	}
 
-	req.Header.Set("Accept", `multipart/mixed; boundary="graphql"; subscriptionSpec=1.0, application/json`)
 	for headerName, headerValues := range args.headers {
 		for _, headerValue := range headerValues {
 			req.Header.Set(headerName, headerValue)
+			// fmt.Println("Setting Input header:", headerName, "=", headerValue)
 		}
 	}
+	// if the Accept header is not set, we set it to the default
+	if _, ok := req.Header["Accept"]; !ok {
+		req.Header.Set("Accept", `multipart/mixed; boundary="graphql"; subscriptionSpec=1.0, application/json`)
+	}
+	// if the Accept-Encoding header is not set, we set it to the default
+	if _, ok := req.Header["Accept-Encoding"]; !ok {
+		req.Header.Set("Accept-Encoding", "gzip, deflate")
+	}
+	req.Header.Del("Accept-Encoding")
+
+	// Log the request as a curl command for debugging
+	// curlCommand := formatAsCurl(req, args.body)
+	// log.Printf("Request as curl command:\n%s", curlCommand)
 
 	resp, err := httpClient.Do(req)
 
@@ -412,7 +496,9 @@ func (ms *MultipartSubscription) connectionClosedWithError(err error) error {
 	return ms.callEventListeners(events.CLOSE)
 }
 
-func (ms *MultipartSubscription) close(code int, reason string) {
+func (ms *MultipartSubscription) close() {
+	delete(ms.holder.objects, ms.requestID)
+
 	ms.vu.State().Logger.Info("CLOSE CALLED")
 	ms.readyState = CLOSED
 	close(ms.done)
@@ -441,7 +527,7 @@ func parseURL(urlValue sobek.Value) (*url.URL, error) {
 
 // defineMultipartHttp defines all properties and methods for the MultipartHttp
 func (ms *MultipartSubscription) defineMultipartHttp(rt *sobek.Runtime) {
-	must(rt, ms.obj.DefineDataProperty("close", rt.ToValue(ms.close), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
+	must(rt, ms.obj.DefineDataProperty("close", rt.ToValue(ms.close), sobek.FLAG_FALSE, sobek.FLAG_TRUE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineDataProperty("url", rt.ToValue(ms.url.String()), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineDataProperty("addEventListener", rt.ToValue(ms.addEventListener), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE))
 	must(rt, ms.obj.DefineAccessorProperty("readyState", rt.ToValue(func() sobek.Value { return rt.ToValue((uint)(ms.readyState)) }), nil, sobek.FLAG_FALSE, sobek.FLAG_TRUE))

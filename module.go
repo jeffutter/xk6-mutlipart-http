@@ -30,6 +30,7 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		vu:                   vu,
 		exports:              rt.NewObject(),
 		httpMultipartMetrics: metrics,
+		holder:               &ObjectHolder{},
 	}
 
 	mustExport := func(name string, value interface{}) {

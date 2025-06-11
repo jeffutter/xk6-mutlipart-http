@@ -10,7 +10,10 @@ require (
 	go.k6.io/k6 v1.0.0
 )
 
-require go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+require (
+	github.com/andybalholm/brotli v1.1.1 // indirect
+	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+)
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
