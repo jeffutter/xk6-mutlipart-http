@@ -2,7 +2,6 @@ package multipartHTTP
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -53,32 +52,28 @@ func NewParser(r io.Reader, contentType string) (*Parser, error) {
 // NextPart reads and returns the next part from the multipart stream
 // Returns io.EOF when no more parts are available
 func (p *Parser) NextPart() (*Part, error) {
-	// fmt.Println("A")
 	if p.finished {
 		return nil, io.EOF
 	}
 
-	// fmt.Println("B")
 	// Look for the boundary
 	if err := p.findBoundary(); err != nil {
 		return nil, err
 	}
 
-	// fmt.Println("C")
 	// Read headers
 	headers, err := p.readHeaders()
 	if err != nil {
 		return nil, err
 	}
 
-	// fmt.Println("D")
-	// Read body until next boundary
+	// Read one line from the body
+	// Can't read until next boundary, since the next boundary (with the next message) may not arrive for a while
 	body, err := p.readBody()
 	if err != nil {
 		return nil, err
 	}
 
-	// fmt.Println("E")
 	return &Part{
 		Header: headers,
 		Body:   body,
@@ -91,7 +86,7 @@ func (p *Parser) findBoundary() error {
 
 	for {
 		line, err := p.readLine()
-		// fmt.Printf("Find Boundary Line: %s | %s\n", line, string(line))
+
 		if err != nil {
 			if err == io.EOF {
 				return ErrUnexpectedEOF
@@ -164,60 +159,18 @@ func (p *Parser) readHeaders() (textproto.MIMEHeader, error) {
 	return headers, nil
 }
 
-// readBody reads the body of a part until the next boundary
+// Read one line as the body. We can only read one line at a time because the next boundary may not arrive for a while.
 func (p *Parser) readBody() ([]byte, error) {
-	var body bytes.Buffer
-	boundaryPrefix := "--" + p.boundary
-
-	for {
-		line, err := p.readLine()
-		if err != nil {
-			if err == io.EOF {
-				return body.Bytes(), nil
-			}
-			return nil, err
+	line, err := p.readLine()
+	trimmedLine := strings.TrimSpace(line)
+	if err != nil {
+		if err == io.EOF {
+			return []byte(trimmedLine[:]), nil
 		}
-
-		trimmedLine := strings.TrimSpace(line)
-
-		// Check for boundary
-		if trimmedLine == boundaryPrefix {
-			// Put the boundary line back for the next part
-			p.reader = bufio.NewReader(io.MultiReader(
-				strings.NewReader(line+"\n"),
-				p.reader,
-			))
-
-			// Remove trailing CRLF from body if present
-			bodyBytes := body.Bytes()
-			if len(bodyBytes) >= 2 && bodyBytes[len(bodyBytes)-2] == '\r' && bodyBytes[len(bodyBytes)-1] == '\n' {
-				bodyBytes = bodyBytes[:len(bodyBytes)-2]
-			} else if len(bodyBytes) >= 1 && bodyBytes[len(bodyBytes)-1] == '\n' {
-				bodyBytes = bodyBytes[:len(bodyBytes)-1]
-			}
-
-			return bodyBytes, nil
-		}
-
-		// Check for final boundary
-		if trimmedLine == boundaryPrefix+"--" {
-			p.finished = true
-
-			// Remove trailing CRLF from body if present
-			bodyBytes := body.Bytes()
-			if len(bodyBytes) >= 2 && bodyBytes[len(bodyBytes)-2] == '\r' && bodyBytes[len(bodyBytes)-1] == '\n' {
-				bodyBytes = bodyBytes[:len(bodyBytes)-2]
-			} else if len(bodyBytes) >= 1 && bodyBytes[len(bodyBytes)-1] == '\n' {
-				bodyBytes = bodyBytes[:len(bodyBytes)-1]
-			}
-
-			return bodyBytes, nil
-		}
-
-		// Add line to body
-		body.WriteString(line)
-		body.WriteByte('\n')
+		return nil, err
 	}
+
+	return []byte(trimmedLine), nil
 }
 
 // readLine reads a line from the input, handling both CRLF and LF line endings

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,7 +51,8 @@ type MultipartSubscription struct {
 	eventListeners *eventListeners
 
 	// fields that should be seen by js only be updated on the event loop
-	readyState ReadyState
+	readyState      ReadyState
+	readyStateMutex *sync.Mutex // mutex to protect the readyState field
 
 	requestID uuid.UUID
 
@@ -71,8 +73,8 @@ const (
 )
 
 type Payload struct {
-	// payload string `json:"payload"`
-	payload string
+	// data string `json:"data"`
+	data string
 }
 
 // Exports implements the modules.Instance interface and returns the exported types for the JS module.
@@ -130,6 +132,7 @@ func (r *MultipartSubscriptionAPI) multipartSubscription(c sobek.ConstructorCall
 		url:                  url,
 		tq:                   taskqueue.New(r.vu.RegisterCallback),
 		readyState:           CONNECTING,
+		readyStateMutex:      &sync.Mutex{},
 		done:                 make(chan struct{}),
 		obj:                  rt.NewObject(),
 		eventListeners:       newEventListeners(),
@@ -178,8 +181,11 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 		}
 	}
 
-	// The connection is now open, emst the event
-	ms.readyState = OPEN
+	{
+		ms.readyStateMutex.Lock()
+		defer ms.readyStateMutex.Unlock()
+		ms.readyState = OPEN
+	}
 	ms.queueOpen(time.Now())
 
 	readEventChan := make(chan Payload)
@@ -314,9 +320,9 @@ func (ms MultipartSubscription) loop(client *Client, readEventChan chan Payload,
 	for {
 		select {
 		case event := <-readEventChan:
-			ms.vu.State().Logger.Debugf("[%s] Subscription message received: %s", ms.requestID, event.payload)
+			ms.vu.State().Logger.Debugf("[%s] Subscription message received: %s", ms.requestID, event.data)
 			ms.queueMessage(&message{
-				data: event.payload,
+				data: event.data,
 				t:    time.Now(),
 			})
 
@@ -428,11 +434,9 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 
 // to be run only on the eventloop
 func (ms *MultipartSubscription) connectionClosedWithError(err error) error {
-	if ms.readyState == CLOSED {
-		return nil
-	}
-	ms.readyState = CLOSED
-	close(ms.done)
+	ms.vu.State().Logger.Errorf("MultipartSubscription connection closed with error: %s, requestID: %s", err, ms.requestID)
+
+	ms.close()
 
 	if err != nil {
 		if errList := ms.callErrorListeners(err); errList != nil {
@@ -443,11 +447,15 @@ func (ms *MultipartSubscription) connectionClosedWithError(err error) error {
 }
 
 func (ms *MultipartSubscription) close() {
-	delete(ms.holder.objects, ms.requestID)
+	ms.readyStateMutex.Lock()
+	defer ms.readyStateMutex.Unlock()
+	if ms.readyState != CLOSED {
+		delete(ms.holder.objects, ms.requestID)
 
-	ms.vu.State().Logger.Info("CLOSE CALLED")
-	ms.readyState = CLOSED
-	close(ms.done)
+		ms.vu.State().Logger.Info("Closing MultipartSubscription, requestID: ", ms.requestID)
+		ms.readyState = CLOSED
+		close(ms.done)
+	}
 }
 
 // parseURL parses the url from the first constructor calls argument or returns an error

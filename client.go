@@ -44,7 +44,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 	parser, err := NewParser(c.resp.Body, contentType)
 	if err != nil {
 		select {
-		case errorChan <- errors.New("Parser Failed: " + err.Error()):
+		case errorChan <- errors.New("Create Parser Failed: " + err.Error()):
 		case <-c.done:
 			return
 		}
@@ -63,7 +63,6 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 			}
 		}
 
-
 		// Seems to happen if the client is closing
 		if part == nil {
 			break
@@ -75,7 +74,6 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 			continue
 		}
 
-
 		message := part.Body
 
 		payload := Payload{}
@@ -83,7 +81,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 		switch {
 		case hasPrefix(message, "{\"payload\""):
 			c.Logger.Debugf("[%s] Received payload: %s", c.requestID, message)
-			payload.payload = string(message)
+			payload.data = string(message)
 			select {
 			case readChan <- payload:
 			case <-c.done:
@@ -93,7 +91,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 		// I think this is a slightly different protocol used by apollo server? (and the go gqlgen)
 		case hasPrefix(message, "{\"data\""):
 			c.Logger.Debugf("[%s] Received payload: %s", c.requestID, message)
-			payload.payload = string(message)
+			payload.data = string(message)
 			select {
 			case readChan <- payload:
 			case <-c.done:
@@ -103,7 +101,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 		// I think this is a slightly different protocol used by apollo server? (and the go gqlgen)
 		case hasPrefix(message, "{\"incremental\""):
 			c.Logger.Debugf("[%s] Received payload: %s", c.requestID, message)
-			payload.payload = string(message)
+			payload.data = string(message)
 			select {
 			case readChan <- payload:
 			case <-c.done:
