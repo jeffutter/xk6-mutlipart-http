@@ -179,6 +179,13 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 			ms.tq.Close()
 			return
 		}
+		// If we don't throw but still have an error, don't continue with nil client
+		return
+	}
+
+	// Additional safety check
+	if client == nil {
+		return
 	}
 
 	{
@@ -328,10 +335,7 @@ func (ms MultipartSubscription) loop(client *Client, readEventChan chan Payload,
 
 		case readErr := <-readErrChan:
 			ms.vu.State().Logger.Errorf("[%s] Subscription read error: %s", ms.requestID, readErr)
-			ms.queueMessage(&message{
-				data: readErr.Error(),
-				t:    time.Now(),
-			})
+			ms.queueError(readErr)
 
 		case <-ctxDone:
 			ms.vu.State().Logger.Debugf("[%s] VU Shutting down, subscription messages will not be forwarded to VU", ms.requestID)

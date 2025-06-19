@@ -45,6 +45,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 	if err != nil {
 		select {
 		case errorChan <- errors.New("Create Parser Failed: " + err.Error()):
+			return
 		case <-c.done:
 			return
 		}
