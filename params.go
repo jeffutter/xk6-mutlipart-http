@@ -50,6 +50,9 @@ func parseConnectArgs(state *lib.State, rt *sobek.Runtime, args ...sobek.Value) 
 
 	// Parse the optional second argument (params)
 	params := paramsV.ToObject(rt)
+	if params == nil {
+		return parsedArgs, nil
+	}
 	for _, k := range params.Keys() {
 		switch k {
 		case "headers":

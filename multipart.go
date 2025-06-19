@@ -32,6 +32,10 @@ type Parser struct {
 // NewParser creates a new multipart parser
 // contentType should be the full Content-Type header value (e.g., "multipart/mixed; boundary=example")
 func NewParser(r io.Reader, contentType string) (*Parser, error) {
+	if r == nil {
+		return nil, errors.New("reader cannot be nil")
+	}
+
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse content type: %w", err)
@@ -135,6 +139,10 @@ func (p *Parser) readHeaders() (textproto.MIMEHeader, error) {
 
 		// Handle header continuation lines
 		for {
+			if p.reader == nil {
+				break
+			}
+
 			peek, err := p.reader.Peek(1)
 			if err != nil {
 				break
@@ -175,6 +183,10 @@ func (p *Parser) readBody() ([]byte, error) {
 
 // readLine reads a line from the input, handling both CRLF and LF line endings
 func (p *Parser) readLine() (string, error) {
+	if p.reader == nil {
+		return "", errors.New("reader is nil")
+	}
+
 	line, err := p.reader.ReadString('\n')
 	if err != nil {
 		return line, err

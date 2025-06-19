@@ -162,7 +162,17 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 	parsedArgs, err := parseConnectArgs(state, rt, args...)
 	if err != nil {
 		fmt.Println("Parse Connection Error: ", err, ". Args: ", args)
+		ms.queueError(err)
 		ms.tq.Close()
+		return
+	}
+
+	if parsedArgs == nil {
+		err := errors.New("failed to parse connection arguments")
+		fmt.Println("Parse Connection Error: ", err, ". Args: ", args)
+		ms.queueError(err)
+		ms.tq.Close()
+		return
 	}
 
 	urlString := url.String()
@@ -170,7 +180,6 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 
 	if err != nil {
 		// Pass the error to the user script before exiting immediately
-		// client.handleEvent("error", rt.ToValue(err))
 		if state.Options.Throw.Bool {
 			// Pass the error to the user script before exiting immediately
 			ms.tq.Queue(func() error {
@@ -180,11 +189,16 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 			return
 		}
 		// If we don't throw but still have an error, don't continue with nil client
+		ms.queueError(err)
+		ms.tq.Close()
 		return
 	}
 
 	// Additional safety check
 	if client == nil {
+		err := errors.New("client is nil after request")
+		ms.queueError(err)
+		ms.tq.Close()
 		return
 	}
 
@@ -241,6 +255,10 @@ func (ms *MultipartSubscription) queueClose(timestamp time.Time) {
 }
 
 func (ms *MultipartSubscription) queueMessage(msg *message) {
+	if msg == nil {
+		return
+	}
+
 	ms.tq.Queue(func() error {
 		if ms.readyState != OPEN {
 			return nil // TODO maybe still emit
@@ -309,6 +327,10 @@ func (ms MultipartSubscription) loop(client *Client, readEventChan chan Payload,
 	ctx := ms.vu.Context()
 
 	defer func() {
+		if client != nil {
+			_ = client.closeResponseBody()
+		}
+
 		metrics.PushIfNotDone(ctx, ms.vu.State().Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
 				Metric: ms.httpMultipartMetrics.HTTPMultipartSessionDuration,
@@ -339,19 +361,33 @@ func (ms MultipartSubscription) loop(client *Client, readEventChan chan Payload,
 
 		case <-ctxDone:
 			ms.vu.State().Logger.Debugf("[%s] VU Shutting down, subscription messages will not be forwarded to VU", ms.requestID)
-			// _ = client.closeResponseBody()
+			if client != nil {
+				_ = client.closeResponseBody()
+			}
 			ctxDone = nil
 
 		case <-readCloseChan:
 			ms.vu.State().Logger.Debugf("[%s] Subscription closing", ms.requestID)
-			_ = client.closeResponseBody()
+			if client != nil {
+				_ = client.closeResponseBody()
+			}
+			return
 
 		case <-ms.done:
 			ms.vu.State().Logger.Debugf("[%s] MultipartSubscription closed", ms.requestID)
-			_ = client.closeResponseBody()
+			if client != nil {
+				_ = client.closeResponseBody()
+			}
 			return
 
-		case <-client.done:
+		case <-func() <-chan struct{} {
+			if client != nil && client.done != nil {
+				return client.done
+			}
+			// Return a channel that will never be ready if client.done is nil
+			ch := make(chan struct{})
+			return ch
+		}():
 			ms.vu.State().Logger.Debugf("[%s] Subscription closed", ms.requestID)
 			return
 		}
@@ -396,10 +432,12 @@ func (ms *MultipartSubscription) request(state *lib.State, rt *sobek.Runtime, ur
 		return &subscriptionClient, err
 	}
 
-	for headerName, headerValues := range args.headers {
-		for _, headerValue := range headerValues {
-			req.Header.Set(headerName, headerValue)
-			// fmt.Println("Setting Input header:", headerName, "=", headerValue)
+	if args.headers != nil {
+		for headerName, headerValues := range args.headers {
+			for _, headerValue := range headerValues {
+				req.Header.Set(headerName, headerValue)
+				// fmt.Println("Setting Input header:", headerName, "=", headerValue)
+			}
 		}
 	}
 	// if the Accept header is not set, we set it to the default
@@ -454,11 +492,20 @@ func (ms *MultipartSubscription) close() {
 	ms.readyStateMutex.Lock()
 	defer ms.readyStateMutex.Unlock()
 	if ms.readyState != CLOSED {
-		delete(ms.holder.objects, ms.requestID)
+		if ms.holder != nil && ms.holder.objects != nil {
+			delete(ms.holder.objects, ms.requestID)
+		}
 
 		ms.vu.State().Logger.Info("Closing MultipartSubscription, requestID: ", ms.requestID)
 		ms.readyState = CLOSED
-		close(ms.done)
+
+		// Close the done channel only if it's not already closed
+		select {
+		case <-ms.done:
+			// Channel is already closed
+		default:
+			close(ms.done)
+		}
 	}
 }
 

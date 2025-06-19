@@ -41,6 +41,15 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 		}
 	}
 
+	if c.resp.Body == nil {
+		select {
+		case errorChan <- errors.New("HTTP response body is nil"):
+			return
+		case <-c.done:
+			return
+		}
+	}
+
 	parser, err := NewParser(c.resp.Body, contentType)
 	if err != nil {
 		select {
@@ -59,8 +68,9 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 		if err != nil {
 			select {
 			case errorChan <- errors.New("Parser Failed: " + err.Error()):
+				return // Return instead of break to properly exit the function
 			case <-c.done:
-				break
+				return
 			}
 		}
 
@@ -114,6 +124,7 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 
 			select {
 			case errorChan <- errors.New("Unknown event: " + string(message)):
+				return // Return instead of continue to properly handle the error
 			case <-c.done:
 				return
 			}
@@ -121,6 +132,11 @@ func (c *Client) readEvents(readChan chan Payload, errorChan chan error, closeCh
 
 	}
 
+	// Signal that reading is complete
+	select {
+	case closeChan <- 1:
+	case <-c.done:
+	}
 }
 
 // closeResponseBody cleanly closes the response body.
