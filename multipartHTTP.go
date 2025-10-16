@@ -3,6 +3,7 @@ package multipartHTTP
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -197,6 +198,22 @@ func (ms *MultipartSubscription) establishConnection(url url.URL, args ...sobek.
 	// Additional safety check
 	if client == nil {
 		err := errors.New("client is nil after request")
+		ms.queueError(err)
+		ms.tq.Close()
+		return
+	}
+
+	if client.resp.StatusCode < 200 || client.resp.StatusCode >= 300 {
+		body, err := io.ReadAll(client.resp.Body)
+		if err != nil {
+			err = fmt.Errorf("[%s] Error starting multipart subscription: code:%d - %s", client.requestID, client.resp.StatusCode, http.StatusText(client.resp.StatusCode))
+			ms.queueError(err)
+			ms.tq.Close()
+			return
+		}
+
+		client.Logger.Debugf("[%s] Error starting multipart subscription: code:%d - %s: %s", client.requestID, client.resp.StatusCode, http.StatusText(client.resp.StatusCode), body)
+		err = fmt.Errorf("[%s] Error starting multipart subscription: code:%d - %s: %s", client.requestID, client.resp.StatusCode, http.StatusText(client.resp.StatusCode), body)
 		ms.queueError(err)
 		ms.tq.Close()
 		return
